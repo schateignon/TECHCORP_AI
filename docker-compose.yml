@@ -42,7 +42,7 @@ services:
       techcorp_net:
         ipv4_address: 192.168.56.10
 
-  # SRV-APP-01 - Serveur MCP SSE (192.168.56.10:8001)
+  # SRV-APP-01 - Serveur MCP SSE (192.168.56.11:8001)
   mcp_server:
     build:
       context: .

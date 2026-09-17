@@ -8,7 +8,8 @@ CREATE TABLE servers (
     role VARCHAR(50) NOT NULL,
     os VARCHAR(50),
     environment VARCHAR(20) NOT NULL,
-    inventory_status VARCHAR(20) NOT NULL
+    inventory_status VARCHAR(20) NOT NULL,
+    port INT NOT NULL
 );
 
 -- 2. Services exposes
