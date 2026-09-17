@@ -1,4 +1,10 @@
 fastapi
 uvicorn
-mcp[cli]
+mcp[cli]==1.26.0
 requests
+streamlit
+psycopg2-binary
+python-dotenv
+pydantic
+pytest
+httpx

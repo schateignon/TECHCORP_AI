@@ -1,0 +1,78 @@
+networks:
+  techcorp_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.56.0/24
+
+services:
+  # SRV-DB-01 (192.168.56.20) - Base PostgreSQL
+  srv-db-01:
+    image: postgres:17
+    container_name: SRV-DB-01
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      techcorp_net:
+        ipv4_address: 192.168.56.20
+
+  # SRV-APP-01 - API FastAPI (192.168.56.10:8000)
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: SRV-APP-01-API
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=192.168.56.20
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+    depends_on:
+      - srv-db-01
+    networks:
+      techcorp_net:
+        ipv4_address: 192.168.56.10
+
+  # SRV-APP-01 - Serveur MCP SSE (192.168.56.10:8001)
+  mcp_server:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    container_name: SRV-APP-01-MCP
+    ports:
+      - "8001:8001"
+    environment:
+      - DB_HOST=192.168.56.20
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - FASTAPI_URL=http://192.168.56.10:8000
+    depends_on:
+      - srv-db-01
+      - api
+    networks:
+      techcorp_net:
+        ipv4_address: 192.168.56.11
+
+  # SRV-WEB-01 (192.168.56.30) - Serveur Web cible
+  srv-web-01:
+    image: nginx:alpine
+    container_name: SRV-WEB-01
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      techcorp_net:
+        ipv4_address: 192.168.56.30
+
+volumes:
+  pgdata:
