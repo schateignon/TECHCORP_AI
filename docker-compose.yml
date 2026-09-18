@@ -1,78 +1,105 @@
-networks:
-  techcorp_net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 192.168.56.0/24
-
+name: techcorp-ai
 services:
-  # SRV-DB-01 (192.168.56.20) - Base PostgreSQL
   srv-db-01:
     image: postgres:17
-    container_name: SRV-DB-01
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${DB_NAME:-techcorp}
+      POSTGRES_USER: tech_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Exécuter python scripts/setup_env.py}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:?}
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?}
+      ETL_DB_PASSWORD: ${ETL_DB_PASSWORD:?}
     volumes:
-      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - pgdata:/var/lib/postgresql/data
+      - pgdata_v2:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/init_roles.sh:/docker-entrypoint-initdb.d/02-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tech_admin -d ${DB_NAME:-techcorp}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
     networks:
-      techcorp_net:
-        ipv4_address: 192.168.56.20
+      db_net:
+        ipv4_address: 172.29.57.20
 
-  # SRV-APP-01 - API FastAPI (192.168.56.10:8000)
   api:
     build:
       context: .
-      dockerfile: api/Dockerfile
-    container_name: SRV-APP-01-API
-    ports:
-      - "8000:8000"
+      dockerfile: api/dockerfile
     environment:
-      - DB_HOST=192.168.56.20
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
+      DB_HOST: srv-db-01
+      DB_NAME: ${DB_NAME:-techcorp}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:?}
+      API_TOKEN: ${API_TOKEN:?}
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
-      - srv-db-01
+      srv-db-01: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     networks:
-      techcorp_net:
-        ipv4_address: 192.168.56.10
+      db_net: {}
+      ops_net:
+        ipv4_address: 172.29.56.10
 
-  # SRV-APP-01 - Serveur MCP SSE (192.168.56.11:8001)
   mcp_server:
     build:
       context: .
-      dockerfile: mcp_server/Dockerfile
-    container_name: SRV-APP-01-MCP
-    ports:
-      - "8001:8001"
+      dockerfile: mcp_server/dockerfile
     environment:
-      - DB_HOST=192.168.56.20
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - FASTAPI_URL=http://192.168.56.10:8000
+      DB_HOST: srv-db-01
+      DB_NAME: ${DB_NAME:-techcorp}
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?}
+      API_TOKEN: ${API_TOKEN:?}
+      MCP_TOKEN: ${MCP_TOKEN:?}
+      FASTAPI_URL: http://api:8000
+      MCP_HOST: 0.0.0.0
+    ports: ["127.0.0.1:8001:8001"]
     depends_on:
-      - srv-db-01
-      - api
+      api: {condition: service_healthy}
     networks:
-      techcorp_net:
-        ipv4_address: 192.168.56.11
+      db_net: {}
+      ops_net:
+        ipv4_address: 172.29.56.11
 
-  # SRV-WEB-01 (192.168.56.30) - Serveur Web cible
+  etl:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: api/dockerfile
+    environment:
+      DB_HOST: srv-db-01
+      DB_NAME: ${DB_NAME:-techcorp}
+      ETL_DB_PASSWORD: ${ETL_DB_PASSWORD:?}
+    volumes:
+      - ./data_demo:/app/data_demo:ro
+      - ./data_raw:/app/data_raw:ro
+    command: ["python", "-m", "etl.clean_and_load", "--data-dir", "/app/data_demo", "--label", "demonstration_synthetique"]
+    depends_on:
+      srv-db-01: {condition: service_healthy}
+    networks: [db_net]
+
   srv-web-01:
-    image: nginx:alpine
-    container_name: SRV-WEB-01
-    ports:
-      - "80:80"
-      - "443:443"
+    image: nginx:latest
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/demo-up.conf:ro
+      - ./infra/nginx-down.conf:/etc/nginx/demo-down.conf:ro
+    command: ["/bin/sh", "-c", "cp /etc/nginx/demo-up.conf /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
+    ports: ["127.0.0.1:8080:80"]
     networks:
-      techcorp_net:
-        ipv4_address: 192.168.56.30
+      ops_net:
+        ipv4_address: 172.29.56.30
+
+networks:
+  db_net:
+    internal: true
+    ipam:
+      config: [{subnet: 172.29.57.0/24}]
+  ops_net:
+    ipam:
+      config: [{subnet: 172.29.56.0/24}]
 
 volumes:
-  pgdata:
+  pgdata_v2:

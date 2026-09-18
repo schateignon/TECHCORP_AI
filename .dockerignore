@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+.venv
+__pycache__
+.pytest_cache
+logs
+docs
+data_raw
+preparation_locale

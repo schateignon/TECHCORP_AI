@@ -1,104 +1,111 @@
-import os
-import time
 import logging
-from typing import Generator
+import time
+from typing import Literal
 import psycopg2
-from psycopg2.extras import RealDictCursor
-from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
+from common.db import database
+from common.security import hostname, valid_token
 
-# Configuration des logs pour la contrainte de journalisation
+logger = logging.getLogger("techcorp.api")
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("api_logger")
+app = FastAPI(title="TECHCORP Ticketing API", version="2.0")
+Priority = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
-app = FastAPI(title="TECHCORP Ticketing API")
-
-# --- CONTRAINTE : JOURNALISATION DES REQUÊTES ---
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = (time.time() - start_time) * 1000
-    logger.info(
-        f"Méthode: {request.method} | Path: {request.url.path} | "
-        f"Statut: {response.status_code} | Temps: {process_time:.2f}ms"
-    )
-    return response
-
-# Generator de connexion BDD avec try/finally
-def get_db() -> Generator:
-    conn = None
+    start = time.monotonic()
+    status = 500
     try:
-        conn = psycopg2.connect(
-            host=os.getenv("DB_HOST", "192.168.56.20"),
-            database=os.getenv("DB_NAME", "bdd"), 
-            user=os.getenv("DB_USER", "user"),            
-            password=os.getenv("DB_PASSWORD", "mot de passe"),
-            cursor_factory=RealDictCursor
-        )
-        yield conn
-    except Exception as e:
-        logger.error(f"Erreur de connexion BDD : {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne de base de données")
+        response = await call_next(request)
+        status = response.status_code
+        return response
     finally:
-        if conn:
-            conn.close()
+        logger.info("method=%s endpoint=%s status=%s duration_ms=%.2f",
+                    request.method, request.url.path, status, (time.monotonic()-start)*1000)
+
+def authorize(authorization: str = Header(default="")):
+    if not valid_token(authorization, "API_TOKEN"):
+        raise HTTPException(401, "Authentification requise")
+
+def get_db():
+    try:
+        with database("api") as conn:
+            yield conn
+    except psycopg2.Error:
+        logger.error("Opération PostgreSQL indisponible")
+        raise HTTPException(503, "Base de données indisponible")
 
 class TicketCreate(BaseModel):
-    title: str
+    title: str = Field(min_length=3, max_length=255)
     hostname: str
-    priority: str
+    priority: Priority
+    description: str = Field(default="", max_length=4000)
+
+    @field_validator("hostname")
+    @classmethod
+    def normalize_host(cls, value):
+        return hostname(value)
+
+    @field_validator("title")
+    @classmethod
+    def nonempty_title(cls, value):
+        if len(value.strip()) < 3:
+            raise ValueError("Titre trop court")
+        return value.strip()
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "host": "SRV-APP-01 (192.168.56.10)"}
+    return {"status": "ok", "component": "ticketing_api", "scope": "process"}
 
-@app.get("/tickets")
+@app.get("/tickets", dependencies=[Depends(authorize)])
 def get_all_tickets(db=Depends(get_db)):
     with db.cursor() as cur:
-        cur.execute("SELECT * FROM tickets ORDER BY id DESC;")
+        cur.execute("SELECT * FROM tickets ORDER BY id DESC LIMIT 200")
         return cur.fetchall()
 
-@app.get("/tickets/open")
-def get_open_tickets(priority: str = None, hostname: str = None, db=Depends(get_db)):
-    query = "SELECT * FROM tickets WHERE status = 'OPEN'"
+@app.get("/tickets/open", dependencies=[Depends(authorize)])
+def get_open_tickets(priority: Priority | None = None, hostname: str | None = None, db=Depends(get_db)):
+    query = "SELECT * FROM tickets WHERE status IN ('OPEN','IN_PROGRESS')"
     params = []
-    
     if priority:
         query += " AND priority = %s"
         params.append(priority)
     if hostname:
-        query += " AND UPPER(hostname) = UPPER(%s)"
-        params.append(hostname)
-        
+        query += " AND hostname = %s"
+        params.append(hostname.strip().upper())
     with db.cursor() as cur:
-        cur.execute(query, tuple(params))
+        cur.execute(query + " ORDER BY created_at DESC, id DESC LIMIT 200", params)
         return cur.fetchall()
 
-@app.get("/tickets/{id}")
+@app.get("/tickets/{id}", dependencies=[Depends(authorize)])
 def get_ticket_by_id(id: int, db=Depends(get_db)):
     with db.cursor() as cur:
-        cur.execute("SELECT * FROM tickets WHERE id = %s;", (id,))
+        cur.execute("SELECT * FROM tickets WHERE id = %s", (id,))
         ticket = cur.fetchone()
-        if not ticket:
-            raise HTTPException(status_code=404, detail=f"Ticket #{id} non trouvé")
-        return ticket
+    if not ticket:
+        raise HTTPException(404, "Ticket introuvable")
+    return ticket
 
-@app.get("/servers/{hostname}/tickets")
+@app.get("/servers/{hostname}/tickets", dependencies=[Depends(authorize)])
 def get_tickets_by_server(hostname: str, db=Depends(get_db)):
     with db.cursor() as cur:
-        cur.execute("SELECT * FROM tickets WHERE UPPER(hostname) = UPPER(%s);", (hostname,))
+        cur.execute("SELECT * FROM tickets WHERE hostname=%s ORDER BY id DESC LIMIT 200",
+                    (hostname.strip().upper(),))
         return cur.fetchall()
 
-@app.post("/tickets", status_code=201)
+@app.post("/tickets", status_code=201, dependencies=[Depends(authorize)])
 def create_ticket(ticket: TicketCreate, db=Depends(get_db)):
     with db.cursor() as cur:
-        cur.execute("""
-            INSERT INTO tickets (title, hostname, priority, status)
-            VALUES (%s, %s, %s, 'OPEN') RETURNING *;
-        """, (ticket.title, ticket.hostname, ticket.priority.upper()))
+        cur.execute("""INSERT INTO tickets(title, hostname, priority, status, description)
+                    VALUES (%s,%s,%s,'OPEN',%s) RETURNING *""",
+                    (ticket.title, ticket.hostname, ticket.priority, ticket.description))
         created = cur.fetchone()
-    
     db.commit()
-    logger.info(f"Nouveau ticket créé ID #{created['id']} pour {ticket.hostname}")
+    logger.info("ticket_created id=%s hostname=%s", created["id"], ticket.hostname)
     return created

@@ -2,7 +2,7 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY mcp_server/ /app/mcp_server
-COPY procedures/ /app/procedures
-EXPOSE 8001
-CMD ["python", "mcp_server/server.py"]
+COPY common/ common/
+COPY mcp_server/ mcp_server/
+COPY procedures/ procedures/
+CMD ["python", "-m", "mcp_server.server"]

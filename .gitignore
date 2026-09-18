@@ -1,17 +1,33 @@
-# Environnement Python
+# Configuration locale
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Environnement Python et caches
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 venv/
 ENV/
 __pycache__/
 *.py[cod]
 
-# Base de données locales / SQLite / Logs
+# Données et résultats locaux
+logs/
+docs/evidence/*.json
 *.log
 *.db
 data_raw/
+data_demo/
+preparation_locale/
 pgdata/
 
 # Divers
+~$*
 .DS_Store
 .idea/
 .vscode/
